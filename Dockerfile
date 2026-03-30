@@ -12,4 +12,5 @@ FROM heroiclabs/nakama:3.22.0
 
 COPY --from=modules-builder /workspace/modules/build /nakama/data/modules
 
-CMD ["/bin/sh", "-ec", "nakama migrate up --database.address \"$DATABASE_ADDRESS\" && exec nakama --name nakama1 --database.address \"$DATABASE_ADDRESS\" --logger.level INFO"]
+ENTRYPOINT ["/bin/sh", "-ec"]
+CMD [": \"${DATABASE_ADDRESS:?DATABASE_ADDRESS is required}\"; /nakama/nakama migrate up --database.address \"$DATABASE_ADDRESS\" && exec /nakama/nakama --name nakama1 --database.address \"$DATABASE_ADDRESS\" --logger.level INFO"]
