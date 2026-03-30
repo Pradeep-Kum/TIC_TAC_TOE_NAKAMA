@@ -15,9 +15,13 @@ export function MatchScreen({
     <section className="match-screen">
       <div className="panel player-panel">
         <p className="section-label">Match</p>
-        <p className="player-summary">
-          Playing as <strong>{mySymbol || "..."}</strong> in <strong>{activeMode}</strong> mode
-        </p>
+        <div className="player-summary">
+          <span className="player-summary__label">Playing As</span>
+          <div className="player-summary__value-row">
+            <strong className={`player-symbol player-symbol--${(mySymbol || "pending").toLowerCase()}`}>{mySymbol || "..."}</strong>
+            <span className="player-mode-badge">{activeMode}</span>
+          </div>
+        </div>
         {activeMode === "timed" && Number.isFinite(turnSecondsRemaining) ? (
           <p className="timer-text">{isMyTurn ? "Your clock" : "Opponent clock"}: {turnSecondsRemaining}s</p>
         ) : null}

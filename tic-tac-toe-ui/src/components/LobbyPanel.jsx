@@ -33,22 +33,26 @@ export function LobbyPanel({
         <p className="muted-text">Searching for a {selectedMode} opponent...</p>
       ) : (
         <>
-          <button className="primary-button" onClick={onFindMatch}>
-            Auto Match ({selectedMode.toUpperCase()})
-          </button>
+          <div className="lobby-section">
+            <button className="primary-button lobby-primary-button" onClick={onFindMatch}>
+              Auto Match ({selectedMode.toUpperCase()})
+            </button>
+          </div>
 
-          <div className="action-grid">
-            <button className="secondary-button" onClick={onCreateRoom}>
-              Create Room
-            </button>
-            <button className="ghost-button" onClick={onRefreshRooms}>
-              Refresh Rooms
-            </button>
+          <div className="lobby-section">
+            <div className="action-grid">
+              <button className="secondary-button" onClick={onCreateRoom}>
+                Create Room
+              </button>
+              <button className="ghost-button" onClick={onRefreshRooms}>
+                Refresh Rooms
+              </button>
+            </div>
           </div>
 
           {roomError ? <p className="error-text">{roomError}</p> : null}
 
-          <div className="room-list">
+          <div className="room-list lobby-section">
             <p className="section-label">Open {selectedMode} Rooms</p>
             {roomsLoading ? (
               <p className="muted-text">Loading rooms...</p>
