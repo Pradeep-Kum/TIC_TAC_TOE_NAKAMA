@@ -79,7 +79,7 @@ function App() {
           sessionId: session.session_id || session.sessionId || null,
         };
 
-        const socket = client.createSocket(false, false);
+        const socket = client.createSocket(nakamaUseSsl, false);
         const enterJoinedMatch = async (match) => {
           if (cancelled) return;
 
