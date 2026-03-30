@@ -2,9 +2,9 @@
   "compilerOptions": {
     "target": "ES2017",
     "lib": ["ES2017"],
-    "module": "commonjs",
-    "outDir": "build",
+    "module": "none",
     "rootDir": "src",
+    "outFile": "build/index.js",
     "strict": false,
     "esModuleInterop": true,
     "ignoreDeprecations": "6.0"
