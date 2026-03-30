@@ -30,12 +30,13 @@ export function parseJson(value, fallback = {}) {
 export function parseMatchLabel(label) {
   const parsed = parseJson(label, null);
   if (!parsed || typeof parsed !== "object") {
-    return { name: "tic-tac-toe", mode: "classic" };
+    return { name: "tic-tac-toe", mode: "classic", creatorUsername: null };
   }
 
   return {
     name: parsed.name || "tic-tac-toe",
     mode: parsed.mode === "timed" ? "timed" : "classic",
+    creatorUsername: typeof parsed.creatorUsername === "string" && parsed.creatorUsername.trim() ? parsed.creatorUsername.trim() : null,
   };
 }
 

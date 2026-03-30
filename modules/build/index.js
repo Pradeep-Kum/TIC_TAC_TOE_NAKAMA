@@ -7,13 +7,16 @@ function matchmakerMatched(ctx, logger, nk, matches) {
 function rpcCreateMatch(ctx, logger, nk, payload) {
     var input = parseJsonPayload(payload);
     var mode = normalizeMode(input.mode);
+    var creatorUsername = sanitizeCreatorName(input.creatorUsername);
     var matchId = nk.matchCreate(MATCH_NAME, {
         creator: ctx.userId,
-        mode: mode
+        mode: mode,
+        creatorUsername: creatorUsername
     });
     return JSON.stringify({
         matchId: matchId,
-        mode: mode
+        mode: mode,
+        creatorUsername: creatorUsername
     });
 }
 function rpcGetLeaderboard(ctx, logger, nk, payload) {
@@ -99,7 +102,16 @@ function parseJsonPayload(payload) {
     }
     if (typeof payload === "string") {
         try {
-            return JSON.parse(payload);
+            var parsed = JSON.parse(payload);
+            if (typeof parsed === "string") {
+                try {
+                    return JSON.parse(parsed);
+                }
+                catch (error) {
+                    return {};
+                }
+            }
+            return parsed;
         }
         catch (error) {
             return {};
@@ -113,10 +125,18 @@ function normalizeMode(mode) {
 function getTurnLimitSeconds(mode) {
     return mode === "timed" ? DEFAULT_TURN_SECONDS : null;
 }
-function createMatchLabel(mode) {
+function sanitizeCreatorName(name) {
+    if (!name || typeof name !== "string") {
+        return null;
+    }
+    var trimmed = name.trim();
+    return trimmed ? trimmed : null;
+}
+function createMatchLabel(mode, creatorUsername) {
     return JSON.stringify({
         name: MATCH_NAME,
-        mode: normalizeMode(mode)
+        mode: normalizeMode(mode),
+        creatorUsername: sanitizeCreatorName(creatorUsername)
     });
 }
 function getMatchedMode(matches) {
@@ -169,10 +189,11 @@ function InitModule(ctx, logger, nk, initializer) {
 }
 function matchInit(ctx, logger, nk, params) {
     var mode = normalizeMode(params && params.mode);
+    var creatorUsername = params && params.creatorUsername;
     return {
         state: createInitialMatchState(mode),
         tickRate: 1,
-        label: createMatchLabel(mode)
+        label: createMatchLabel(mode, creatorUsername)
     };
 }
 function matchJoinAttempt(ctx, logger, nk, dispatcher, tick, state, presence, metadata) {

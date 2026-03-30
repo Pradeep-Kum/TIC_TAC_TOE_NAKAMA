@@ -7,14 +7,17 @@ function matchmakerMatched(ctx, logger, nk, matches) {
 function rpcCreateMatch(ctx, logger, nk, payload) {
     var input = parseJsonPayload(payload);
     var mode = normalizeMode(input.mode);
+    var creatorUsername = sanitizeCreatorName(input.creatorUsername);
     var matchId = nk.matchCreate(MATCH_NAME, {
         creator: ctx.userId,
-        mode: mode
+        mode: mode,
+        creatorUsername: creatorUsername
     });
 
     return JSON.stringify({
         matchId: matchId,
-        mode: mode
+        mode: mode,
+        creatorUsername: creatorUsername
     });
 }
 

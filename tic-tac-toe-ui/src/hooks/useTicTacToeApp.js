@@ -10,6 +10,7 @@ export function useTicTacToeApp() {
   const socketRef = useRef(null);
   const sessionRef = useRef(null);
   const identityRef = useRef({ userId: null, sessionId: null });
+  const accountUsernameRef = useRef("");
   const currentMatchIdRef = useRef("");
   const lastSyncRequestAtRef = useRef(0);
   const matchmakerTicketRef = useRef(null);
@@ -155,6 +156,7 @@ export function useTicTacToeApp() {
 
     const account = await withTimeout(nakamaClient.getAccount(session), 5000, "Account lookup timed out.");
     const user = account?.user || {};
+    accountUsernameRef.current = user.username || "";
     setAccountUsername(user.username || "");
 
     disconnectSocket();
@@ -343,6 +345,7 @@ export function useTicTacToeApp() {
     clearPersistedSession();
     sessionRef.current = null;
     setIsAuthenticated(false);
+    accountUsernameRef.current = "";
     setAccountUsername("");
     setLeaderboard([]);
     setLeaderboardError("");
@@ -376,7 +379,12 @@ export function useTicTacToeApp() {
     setRoomError("");
 
     try {
-      const rpcResponse = await nakamaClient.rpc(sessionRef.current, "create_ttt_match", JSON.stringify({ mode: selectedMode }));
+      const creatorUsername = accountUsernameRef.current || accountUsername || normalizeUsername(authUsername);
+      const rpcResponse = await nakamaClient.rpc(
+        sessionRef.current,
+        "create_ttt_match",
+        JSON.stringify({ mode: selectedMode, creatorUsername }),
+      );
       const payload = parseJson(rpcResponse?.payload, {});
       const matchId = payload.matchId || payload.match_id;
       if (!matchId) {
@@ -411,6 +419,7 @@ export function useTicTacToeApp() {
             size: match.size || 0,
             authoritative: Boolean(match.authoritative),
             mode: label.mode,
+            creatorUsername: label.creatorUsername,
           };
         })
         .filter((match) => match.mode === selectedMode);

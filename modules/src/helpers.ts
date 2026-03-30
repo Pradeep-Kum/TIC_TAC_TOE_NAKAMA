@@ -5,7 +5,16 @@ function parseJsonPayload(payload) {
 
     if (typeof payload === "string") {
         try {
-            return JSON.parse(payload);
+            var parsed = JSON.parse(payload);
+            if (typeof parsed === "string") {
+                try {
+                    return JSON.parse(parsed);
+                } catch (error) {
+                    return {};
+                }
+            }
+
+            return parsed;
         } catch (error) {
             return {};
         }
@@ -22,10 +31,20 @@ function getTurnLimitSeconds(mode: MatchMode): number | null {
     return mode === "timed" ? DEFAULT_TURN_SECONDS : null;
 }
 
-function createMatchLabel(mode: MatchMode): string {
+function sanitizeCreatorName(name): string | null {
+    if (!name || typeof name !== "string") {
+        return null;
+    }
+
+    var trimmed = name.trim();
+    return trimmed ? trimmed : null;
+}
+
+function createMatchLabel(mode: MatchMode, creatorUsername?): string {
     return JSON.stringify({
         name: MATCH_NAME,
-        mode: normalizeMode(mode)
+        mode: normalizeMode(mode),
+        creatorUsername: sanitizeCreatorName(creatorUsername)
     });
 }
 

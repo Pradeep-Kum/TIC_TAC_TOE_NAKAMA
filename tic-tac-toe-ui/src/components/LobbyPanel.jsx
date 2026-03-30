@@ -62,7 +62,7 @@ export function LobbyPanel({
               rooms.map((room) => (
                 <div className="room-card" key={room.matchId}>
                   <span>
-                    {room.matchId.slice(0, 8)}... ({room.size}/2) - {room.mode}
+                    {room.creatorUsername ? `${room.creatorUsername}'s room` : `${room.matchId.slice(0, 8)}...`} ({room.size}/2) - {room.mode}
                   </span>
                   <button className="join-button" onClick={() => onJoinRoom(room.matchId)}>
                     Join

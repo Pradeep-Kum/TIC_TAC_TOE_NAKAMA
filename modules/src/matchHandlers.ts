@@ -1,9 +1,10 @@
 function matchInit(ctx, logger, nk, params) {
     var mode = normalizeMode(params && params.mode);
+    var creatorUsername = params && params.creatorUsername;
     return {
         state: createInitialMatchState(mode),
         tickRate: 1,
-        label: createMatchLabel(mode)
+        label: createMatchLabel(mode, creatorUsername)
     };
 }
 
