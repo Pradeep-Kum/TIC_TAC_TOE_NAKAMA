@@ -1,0 +1,10 @@
+{
+  "name": "modules",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "typescript": "^6.0.2"
+  }
+}
