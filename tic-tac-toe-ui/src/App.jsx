@@ -1,12 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Client } from "@heroiclabs/nakama-js";
+import { Client, Session } from "@heroiclabs/nakama-js";
 
 const nakamaServerKey = import.meta.env.VITE_NAKAMA_SERVER_KEY || "defaultkey";
 const nakamaHost = import.meta.env.VITE_NAKAMA_HOST || "127.0.0.1";
 const nakamaPort = import.meta.env.VITE_NAKAMA_PORT || "7350";
 const nakamaUseSsl = import.meta.env.VITE_NAKAMA_USE_SSL === "true";
+const sessionStorageKey = "ttt_nakama_session";
 
 const client = new Client(nakamaServerKey, nakamaHost, nakamaPort, nakamaUseSsl);
+const modeOptions = [
+  { id: "classic", label: "Classic", description: "No move timer" },
+  { id: "timed", label: "Timed", description: "30 seconds per turn" },
+];
 
 function decodeMatchPayload(raw) {
   if (!raw) return "";
@@ -16,15 +21,83 @@ function decodeMatchPayload(raw) {
   return "";
 }
 
+function parseJson(value, fallback = {}) {
+  if (!value) return fallback;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return fallback;
+    }
+  }
+  return value;
+}
+
+function parseMatchLabel(label) {
+  const parsed = parseJson(label, null);
+  if (!parsed || typeof parsed !== "object") {
+    return { name: "tic-tac-toe", mode: "classic" };
+  }
+  return {
+    name: parsed.name || "tic-tac-toe",
+    mode: parsed.mode === "timed" ? "timed" : "classic",
+  };
+}
+
+function formatPlayerName(name, ownerId) {
+  if (name && !/^[0-9a-f-]{20,}$/i.test(name)) return name;
+  if (ownerId) return `${ownerId.slice(0, 8)}...`;
+  return "Player";
+}
+
+function normalizeUsername(username) {
+  return username.trim().toLowerCase();
+}
+
+function validateUsername(username) {
+  const normalized = normalizeUsername(username);
+  if (!/^[a-z0-9_]{3,20}$/.test(normalized)) {
+    return "Use 3-20 characters: lowercase letters, numbers, or underscore.";
+  }
+  return "";
+}
+
+function makeSyntheticEmail(username) {
+  return `${normalizeUsername(username)}@tic-tac-toe.local`;
+}
+
+function getErrorMessage(error, fallback) {
+  if (!error) return fallback;
+  if (typeof error.message === "string" && error.message.trim()) return error.message;
+  if (typeof error.error === "string" && error.error.trim()) return error.error;
+  return fallback;
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(message)), timeoutMs);
+    }),
+  ]);
+}
+
 function App() {
   const socketRef = useRef(null);
   const sessionRef = useRef(null);
-  const connectionLock = useRef(false);
   const identityRef = useRef({ userId: null, sessionId: null });
   const currentMatchIdRef = useRef("");
   const lastSyncRequestAtRef = useRef(0);
   const matchmakerTicketRef = useRef(null);
 
+  const [authMode, setAuthMode] = useState("login");
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [accountUsername, setAccountUsername] = useState("");
+  const [selectedMode, setSelectedMode] = useState("classic");
   const [mySymbol, setMySymbol] = useState(null);
   const [currentMatchId, setCurrentMatchId] = useState("");
   const [board, setBoard] = useState(Array(9).fill(null));
@@ -36,17 +109,42 @@ function App() {
   const [rooms, setRooms] = useState([]);
   const [roomsLoading, setRoomsLoading] = useState(false);
   const [roomError, setRoomError] = useState("");
+  const [activeMode, setActiveMode] = useState("classic");
+  const [turnSecondsRemaining, setTurnSecondsRemaining] = useState(null);
+  const [leaderboard, setLeaderboard] = useState([]);
+  const [leaderboardLoading, setLeaderboardLoading] = useState(false);
+  const [leaderboardError, setLeaderboardError] = useState("");
+  const [myStanding, setMyStanding] = useState(null);
 
-  const parseRpcPayload = (payload) => {
-    if (!payload) return {};
-    if (typeof payload === "string") {
-      try {
-        return JSON.parse(payload);
-      } catch {
-        return {};
-      }
-    }
-    return payload;
+  const resetGameState = () => {
+    setMySymbol(null);
+    setCurrentMatchId("");
+    currentMatchIdRef.current = "";
+    setBoard(Array(9).fill(null));
+    setIsXTurn(true);
+    setIsSearching(false);
+    setGameStatus("waiting");
+    setWinnerSymbol(null);
+    setEndedReason(null);
+    setRooms([]);
+    setRoomsLoading(false);
+    setRoomError("");
+    setActiveMode("classic");
+    setTurnSecondsRemaining(null);
+  };
+
+  const persistSession = (session) => {
+    localStorage.setItem(
+      sessionStorageKey,
+      JSON.stringify({
+        token: session.token,
+        refresh_token: session.refresh_token || session.refreshToken || "",
+      })
+    );
+  };
+
+  const clearPersistedSession = () => {
+    localStorage.removeItem(sessionStorageKey);
   };
 
   const cancelMatchmaking = async () => {
@@ -60,168 +158,42 @@ function App() {
     }
   };
 
-  useEffect(() => {
-    currentMatchIdRef.current = currentMatchId;
-  }, [currentMatchId]);
+  const disconnectSocket = () => {
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+    identityRef.current = { userId: null, sessionId: null };
+    matchmakerTicketRef.current = null;
+  };
 
-  useEffect(() => {
-    let cancelled = false;
+  const loadLeaderboard = async (sessionOverride) => {
+    const session = sessionOverride || sessionRef.current;
+    if (!session) return;
+    setLeaderboardLoading(true);
+    setLeaderboardError("");
 
-    if (connectionLock.current) return;
-    connectionLock.current = true;
+    try {
+      const response = await client.rpc(session, "get_ttt_leaderboard", JSON.stringify({ limit: 10 }));
+      const payload = parseJson(response?.payload, {});
+      setLeaderboard(Array.isArray(payload.records) ? payload.records : []);
+      setMyStanding(Array.isArray(payload.ownerRecords) && payload.ownerRecords.length > 0 ? payload.ownerRecords[0] : null);
+    } catch (error) {
+      console.error("Failed to fetch leaderboard:", error);
+      setLeaderboardError("Could not load leaderboard.");
+      setLeaderboard([]);
+      setMyStanding(null);
+    } finally {
+      setLeaderboardLoading(false);
+    }
+  };
 
-    const init = async () => {
-      try {
-        const session = await client.authenticateDevice(Math.random().toString(36), true);
-        sessionRef.current = session;
-        identityRef.current = {
-          userId: session.user_id || session.userId || null,
-          sessionId: session.session_id || session.sessionId || null,
-        };
-
-        const socket = client.createSocket(false, false);
-        const enterJoinedMatch = async (match) => {
-          if (cancelled) return;
-
-          identityRef.current = {
-            userId: match.self?.user_id || match.self?.userId || identityRef.current.userId,
-            sessionId: match.self?.session_id || match.self?.sessionId || identityRef.current.sessionId,
-          };
-
-          const joinedMatchId = match.match_id || match.matchId;
-          currentMatchIdRef.current = joinedMatchId;
-          setCurrentMatchId(joinedMatchId);
-          setIsSearching(false);
-          setRooms([]);
-          setRoomError("");
-          setGameStatus("waiting");
-          setWinnerSymbol(null);
-          setEndedReason(null);
-
-          setTimeout(() => {
-            requestSync(joinedMatchId);
-          }, 500);
-        };
-        const requestSync = async (matchId) => {
-          if (!matchId || cancelled) return;
-          const now = Date.now();
-          if (now - lastSyncRequestAtRef.current < 350) return;
-          lastSyncRequestAtRef.current = now;
-          console.log("SENDING SYNC REQUEST...");
-          await socket.sendMatchState(matchId, 4, "{}");
-        };
-
-        socket.onmatchmakermatched = async (matched) => {
-          if (cancelled) return;
-
-          console.log("MATCHMAKER SUCCESS:", matched);
-          const hasToken = typeof matched.token === "string" && matched.token.length > 0;
-          const hasMatchId = typeof matched.match_id === "string" && matched.match_id.length > 0;
-          if (!hasToken && !hasMatchId) {
-            console.error("MATCHMAKER ERROR: no token or match_id in payload", matched);
-            setIsSearching(false);
-            return;
-          }
-
-          matchmakerTicketRef.current = null;
-          const match = hasToken
-            ? await socket.joinMatch(null, matched.token)
-            : await socket.joinMatch(matched.match_id);
-          await enterJoinedMatch(match);
-        };
-
-        socket.onmatchpresence = (presenceEvent) => {
-          const presenceMatchId = presenceEvent.match_id || presenceEvent.matchId;
-          if (presenceMatchId && presenceMatchId === currentMatchIdRef.current) {
-            requestSync(presenceMatchId);
-          }
-        };
-
-        socket.onmatchdata = (data) => {
-          const opCode = Number(data.op_code || data.opCode);
-          const jsonString = decodeMatchPayload(data.data);
-
-          if (opCode !== 1) return;
-
-          if (!jsonString || jsonString === "{}") {
-            console.warn("Received empty payload from server");
-            requestSync(currentMatchIdRef.current);
-            return;
-          }
-
-          let payload = null;
-          try {
-            payload = JSON.parse(jsonString);
-          } catch (error) {
-            console.error("Failed to parse match payload:", jsonString, error);
-            return;
-          }
-
-          console.log(`INCOMING: OpCode ${opCode}`, payload);
-
-          setBoard(Array.isArray(payload.board) && payload.board.length === 9 ? payload.board : Array(9).fill(null));
-          setIsXTurn(payload.turn === "X");
-          setGameStatus(payload.status || "playing");
-          setWinnerSymbol(payload.winner === "X" || payload.winner === "O" ? payload.winner : null);
-          setEndedReason(payload.endedReason || null);
-
-          if (payload.players) {
-            const me = payload.players.find((player) =>
-              player.sessionId === identityRef.current.sessionId ||
-              player.session_id === identityRef.current.sessionId ||
-              player.userId === identityRef.current.userId ||
-              player.user_id === identityRef.current.userId
-            );
-
-            if (me) {
-              console.log("SYMBOL ASSIGNED:", me.symbol);
-              setMySymbol(me.symbol);
-            } else {
-              console.warn("My identity not found in player list:", identityRef.current);
-            }
-          }
-        };
-
-        await socket.connect(session, true);
-        if (cancelled) {
-          socket.disconnect();
-          return;
-        }
-        socketRef.current = socket;
-        console.log("Single Socket Connected:", identityRef.current);
-      } catch (e) {
-        console.error("NAKAMA ERROR:", e);
-        if (!cancelled) {
-          connectionLock.current = false;
-        }
-      }
-    };
-
-    init();
-
-    return () => {
-      cancelled = true;
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-        socketRef.current = null;
-      }
-      connectionLock.current = false;
-    };
-  }, []);
-
-  const findMatch = async () => {
-    if (!socketRef.current) return;
-    await cancelMatchmaking();
-    setIsSearching(true);
-    setMySymbol(null);
-    setGameStatus("waiting");
-    setWinnerSymbol(null);
-    setEndedReason(null);
-    setBoard(Array(9).fill(null));
-    setRoomError("");
-    const ticket = await socketRef.current.addMatchmaker("*", 2, 2);
-    matchmakerTicketRef.current = ticket?.ticket || null;
-    console.log("Added to Matchmaker...");
+  const requestSync = async (matchId) => {
+    if (!matchId || !socketRef.current) return;
+    const now = Date.now();
+    if (now - lastSyncRequestAtRef.current < 350) return;
+    lastSyncRequestAtRef.current = now;
+    await socketRef.current.sendMatchState(matchId, 4, "{}");
   };
 
   const applyJoinedMatchState = async (match) => {
@@ -239,10 +211,230 @@ function App() {
     setGameStatus("waiting");
     setWinnerSymbol(null);
     setEndedReason(null);
+    setTurnSecondsRemaining(null);
 
     if (socketRef.current && joinedMatchId) {
       await socketRef.current.sendMatchState(joinedMatchId, 4, "{}");
     }
+  };
+
+  const connectAuthenticatedSession = async (session) => {
+    sessionRef.current = session;
+    persistSession(session);
+    setIsAuthenticated(true);
+
+    const account = await client.getAccount(session);
+    const user = account?.user || {};
+    setAccountUsername(user.username || "");
+
+    disconnectSocket();
+
+    identityRef.current = {
+      userId: session.user_id || session.userId || null,
+      sessionId: session.session_id || session.sessionId || null,
+    };
+
+    const socket = client.createSocket(false, false);
+
+    socket.onmatchmakermatched = async (matched) => {
+      const hasToken = typeof matched.token === "string" && matched.token.length > 0;
+      const hasMatchId = typeof matched.match_id === "string" && matched.match_id.length > 0;
+      if (!hasToken && !hasMatchId) {
+        setIsSearching(false);
+        return;
+      }
+
+      matchmakerTicketRef.current = null;
+      const match = hasToken ? await socket.joinMatch(null, matched.token) : await socket.joinMatch(matched.match_id);
+      await applyJoinedMatchState(match);
+    };
+
+    socket.onmatchpresence = (presenceEvent) => {
+      const presenceMatchId = presenceEvent.match_id || presenceEvent.matchId;
+      if (presenceMatchId && presenceMatchId === currentMatchIdRef.current) {
+        requestSync(presenceMatchId);
+      }
+    };
+
+    socket.onmatchdata = (data) => {
+      const opCode = Number(data.op_code || data.opCode);
+      if (opCode !== 1) return;
+
+      const jsonString = decodeMatchPayload(data.data);
+      if (!jsonString || jsonString === "{}") {
+        requestSync(currentMatchIdRef.current);
+        return;
+      }
+
+      let payload = null;
+      try {
+        payload = JSON.parse(jsonString);
+      } catch (error) {
+        console.error("Failed to parse match payload:", error);
+        return;
+      }
+
+      setBoard(Array.isArray(payload.board) && payload.board.length === 9 ? payload.board : Array(9).fill(null));
+      setIsXTurn(payload.turn === "X");
+      setGameStatus(payload.status || "playing");
+      setWinnerSymbol(payload.winner === "X" || payload.winner === "O" ? payload.winner : null);
+      setEndedReason(payload.endedReason || null);
+      setActiveMode(payload.mode === "timed" ? "timed" : "classic");
+      setTurnSecondsRemaining(Number.isFinite(payload.turnSecondsRemaining) ? payload.turnSecondsRemaining : null);
+
+      if (payload.players) {
+        const me = payload.players.find((player) =>
+          player.sessionId === identityRef.current.sessionId ||
+          player.session_id === identityRef.current.sessionId ||
+          player.userId === identityRef.current.userId ||
+          player.user_id === identityRef.current.userId
+        );
+
+        if (me) {
+          setMySymbol(me.symbol);
+        }
+      }
+    };
+
+    await socket.connect(session, true);
+    socketRef.current = socket;
+    await loadLeaderboard(session);
+  };
+
+  const restoreSession = async () => {
+    const raw = localStorage.getItem(sessionStorageKey);
+    if (!raw) return false;
+
+    try {
+      const parsed = JSON.parse(raw);
+      const restored = Session.restore(parsed.token, parsed.refresh_token);
+      const isExpired = typeof restored.isexpired === "function" ? restored.isexpired(Date.now() / 1000) : restored.isexpired;
+      const session = isExpired
+        ? await withTimeout(client.sessionRefresh(restored), 5000, "Session refresh timed out.")
+        : restored;
+      await withTimeout(connectAuthenticatedSession(session), 5000, "Session restore timed out.");
+      return true;
+    } catch (error) {
+      console.warn("Session restore failed:", error);
+      clearPersistedSession();
+      setAuthError("Previous session expired or could not be restored. Please log in again.");
+      return false;
+    }
+  };
+
+  useEffect(() => {
+    currentMatchIdRef.current = currentMatchId;
+  }, [currentMatchId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const init = async () => {
+      try {
+        const restored = await restoreSession();
+        if (!restored && !cancelled) {
+          resetGameState();
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthLoading(false);
+        }
+      }
+    };
+
+    init();
+
+    return () => {
+      cancelled = true;
+      disconnectSocket();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isAuthenticated && (gameStatus === "won" || gameStatus === "draw" || gameStatus === "abandoned")) {
+      loadLeaderboard();
+    }
+  }, [gameStatus, isAuthenticated]);
+
+  const handleAuthSubmit = async (event) => {
+    event.preventDefault();
+    const usernameError = validateUsername(authUsername);
+    if (usernameError) {
+      setAuthError(usernameError);
+      return;
+    }
+    if (authPassword.length < 8) {
+      setAuthError("Use a password with at least 8 characters.");
+      return;
+    }
+
+    setAuthLoading(true);
+    setAuthError("");
+
+    try {
+      const normalizedUsername = normalizeUsername(authUsername);
+      const create = authMode === "signup";
+      const session = await client.authenticateEmail(
+        create ? makeSyntheticEmail(normalizedUsername) : "",
+        authPassword,
+        create,
+        normalizedUsername
+      );
+      resetGameState();
+      await connectAuthenticatedSession(session);
+      setAuthPassword("");
+    } catch (error) {
+      console.error("Authentication failed:", error);
+      setAuthError(
+        authMode === "signup"
+          ? getErrorMessage(error, "Sign up failed. The username may already be taken.")
+          : getErrorMessage(error, "Login failed. Check your username and password.")
+      );
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await cancelMatchmaking();
+      if (socketRef.current && currentMatchIdRef.current) {
+        await socketRef.current.leaveMatch(currentMatchIdRef.current);
+      }
+      if (sessionRef.current) {
+        await client.sessionLogout(sessionRef.current);
+      }
+    } catch (error) {
+      console.warn("Logout cleanup failed:", error);
+    }
+
+    disconnectSocket();
+    clearPersistedSession();
+    sessionRef.current = null;
+    setIsAuthenticated(false);
+    setAccountUsername("");
+    setLeaderboard([]);
+    setLeaderboardError("");
+    setMyStanding(null);
+    setAuthPassword("");
+    resetGameState();
+  };
+
+  const findMatch = async () => {
+    if (!socketRef.current) return;
+    await cancelMatchmaking();
+    setIsSearching(true);
+    setMySymbol(null);
+    setGameStatus("waiting");
+    setWinnerSymbol(null);
+    setEndedReason(null);
+    setBoard(Array(9).fill(null));
+    setTurnSecondsRemaining(null);
+    setRoomError("");
+
+    const query = `+properties.mode:${selectedMode}`;
+    const ticket = await socketRef.current.addMatchmaker(query, 2, 2, { mode: selectedMode });
+    matchmakerTicketRef.current = ticket?.ticket || null;
   };
 
   const createRoom = async () => {
@@ -251,8 +443,8 @@ function App() {
     setRoomError("");
 
     try {
-      const rpcResponse = await client.rpc(sessionRef.current, "create_ttt_match", {});
-      const payload = parseRpcPayload(rpcResponse?.payload);
+      const rpcResponse = await client.rpc(sessionRef.current, "create_ttt_match", JSON.stringify({ mode: selectedMode }));
+      const payload = parseJson(rpcResponse?.payload, {});
       const matchId = payload.matchId || payload.match_id;
       if (!matchId) {
         setRoomError("Could not create room.");
@@ -275,14 +467,19 @@ function App() {
     setRoomError("");
 
     try {
-      const response = await client.listMatches(sessionRef.current, 20, true, "tic-tac-toe", 0, 2);
+      const response = await client.listMatches(sessionRef.current, 50, true, undefined, 0, 2);
       const available = (response.matches || [])
         .filter((match) => match.match_id && (match.size || 0) < 2)
-        .map((match) => ({
-          matchId: match.match_id,
-          size: match.size || 0,
-          authoritative: !!match.authoritative,
-        }));
+        .map((match) => {
+          const label = parseMatchLabel(match.label);
+          return {
+            matchId: match.match_id,
+            size: match.size || 0,
+            authoritative: !!match.authoritative,
+            mode: label.mode,
+          };
+        })
+        .filter((match) => match.mode === selectedMode);
       setRooms(available);
     } catch (error) {
       console.error("Failed to fetch rooms:", error);
@@ -333,10 +530,11 @@ function App() {
     currentMatchIdRef.current = "";
     setBoard(Array(9).fill(null));
     setIsXTurn(true);
-    setIsSearching(true);
+    setIsSearching(false);
     setGameStatus("waiting");
     setWinnerSymbol(null);
     setEndedReason(null);
+    setTurnSecondsRemaining(null);
 
     try {
       if (previousMatchId) {
@@ -345,55 +543,152 @@ function App() {
     } catch (error) {
       console.warn("Failed to leave previous match:", error);
     }
-
-    try {
-      await cancelMatchmaking();
-      const ticket = await socketRef.current.addMatchmaker("*", 2, 2);
-      matchmakerTicketRef.current = ticket?.ticket || null;
-      console.log("Added to Matchmaker...");
-    } catch (error) {
-      console.error("Failed to re-enter matchmaker:", error);
-      setIsSearching(false);
-    }
   };
 
-  const winner = (() => {
-    const lines = [
-      [0, 1, 2],
-      [3, 4, 5],
-      [6, 7, 8],
-      [0, 3, 6],
-      [1, 4, 7],
-      [2, 5, 8],
-      [0, 4, 8],
-      [2, 4, 6],
-    ];
-
-    for (const [a, b, c] of lines) {
-      if (board[a] && board[a] === board[b] && board[a] === board[c]) return board[a];
-    }
-
-    return null;
-  })();
-  const finalWinner = winnerSymbol || winner;
   const hasGameEnded = gameStatus === "won" || gameStatus === "draw" || gameStatus === "abandoned";
+  const panelWidth = "min(94vw, 460px)";
   const cellSize = "min(28vw, 110px)";
   const boardGap = "min(3.2vw, 15px)";
-  const panelWidth = "min(94vw, 450px)";
+  const currentTurnSymbol = isXTurn ? "X" : "O";
+  const isMyTurn = mySymbol && mySymbol === currentTurnSymbol;
+  const finalWinner = winnerSymbol;
   const statusText =
     gameStatus === "abandoned"
       ? endedReason === "opponent_left"
         ? finalWinner === mySymbol
           ? "Opponent disconnected. You win by forfeit."
-          : "You disconnected."
-        : "Match ended."
+          : "Match ended after a disconnect."
+        : endedReason === "timeout"
+          ? finalWinner === mySymbol
+            ? "Opponent ran out of time. You win."
+            : "You ran out of time."
+          : "Match ended."
       : gameStatus === "won"
-      ? `Winner: ${finalWinner}!`
-      : gameStatus === "draw"
-      ? "It's a draw!"
-      : gameStatus === "waiting"
-      ? "Waiting for players..."
-      : `Turn: ${isXTurn ? "X" : "O"}`;
+        ? `Winner: ${finalWinner}!`
+        : gameStatus === "draw"
+          ? "It's a draw!"
+          : gameStatus === "waiting"
+            ? "Waiting for players..."
+            : `Turn: ${currentTurnSymbol}${activeMode === "timed" && Number.isFinite(turnSecondsRemaining) ? ` - ${turnSecondsRemaining}s` : ""}`;
+
+  if (authLoading) {
+    return (
+      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", backgroundColor: "#121212", color: "#fff" }}>
+        <p>Loading...</p>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div
+        style={{
+          textAlign: "center",
+          backgroundColor: "#121212",
+          color: "#fff",
+          minHeight: "100vh",
+          padding: "20px 14px",
+          fontFamily: "sans-serif",
+        }}
+      >
+        <h1 style={{ fontSize: "clamp(1.6rem, 6vw, 2.2rem)", margin: "10px 0 16px 0" }}>Nakama Tic-Tac-Toe</h1>
+        <div
+          style={{
+            margin: "0 auto",
+            padding: "20px",
+            border: "2px solid #333",
+            width: panelWidth,
+            borderRadius: "15px",
+            backgroundColor: "#1e1e1e",
+            boxSizing: "border-box",
+          }}
+        >
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "16px" }}>
+            <button
+              onClick={() => {
+                setAuthMode("login");
+                setAuthError("");
+              }}
+              style={{
+                padding: "12px",
+                cursor: "pointer",
+                backgroundColor: authMode === "login" ? "#00ACC1" : "#263238",
+                color: "white",
+                border: "1px solid #455A64",
+                borderRadius: "10px",
+              }}
+            >
+              Login
+            </button>
+            <button
+              onClick={() => {
+                setAuthMode("signup");
+                setAuthError("");
+              }}
+              style={{
+                padding: "12px",
+                cursor: "pointer",
+                backgroundColor: authMode === "signup" ? "#00ACC1" : "#263238",
+                color: "white",
+                border: "1px solid #455A64",
+                borderRadius: "10px",
+              }}
+            >
+              Sign Up
+            </button>
+          </div>
+
+          <form onSubmit={handleAuthSubmit} style={{ display: "grid", gap: "12px" }}>
+            <input
+              value={authUsername}
+              onChange={(event) => setAuthUsername(event.target.value)}
+              placeholder="Username"
+              autoComplete="username"
+              style={{
+                padding: "12px",
+                borderRadius: "8px",
+                border: "1px solid #455A64",
+                backgroundColor: "#263238",
+                color: "#fff",
+              }}
+            />
+            <input
+              value={authPassword}
+              onChange={(event) => setAuthPassword(event.target.value)}
+              placeholder="Password"
+              type="password"
+              autoComplete={authMode === "signup" ? "new-password" : "current-password"}
+              style={{
+                padding: "12px",
+                borderRadius: "8px",
+                border: "1px solid #455A64",
+                backgroundColor: "#263238",
+                color: "#fff",
+              }}
+            />
+            {authError && <p style={{ margin: 0, color: "#FF8A80" }}>{authError}</p>}
+            <p style={{ margin: 0, color: "#B0BEC5", fontSize: "13px" }}>
+              Username must be unique and use 3-20 lowercase letters, numbers, or underscores. Passwords must be at least 8 characters.
+            </p>
+            <button
+              type="submit"
+              style={{
+                padding: "12px",
+                cursor: "pointer",
+                backgroundColor: "#FF9800",
+                color: "white",
+                border: "none",
+                borderRadius: "8px",
+                fontWeight: "bold",
+              }}
+            >
+              {authMode === "signup" ? "Create Account" : "Log In"}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -408,119 +703,235 @@ function App() {
     >
       <h1 style={{ fontSize: "clamp(1.5rem, 5.6vw, 2.1rem)", margin: "10px 0 16px 0" }}>Nakama Tic-Tac-Toe</h1>
 
-      {!currentMatchId ? (
-        <div
+      <div
+        style={{
+          margin: "0 auto 18px auto",
+          width: panelWidth,
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "12px",
+          padding: "10px 14px",
+          borderRadius: "12px",
+          backgroundColor: "#1e1e1e",
+          border: "1px solid #333",
+          boxSizing: "border-box",
+        }}
+      >
+        <span style={{ color: "#CFD8DC" }}>Signed in as <strong style={{ color: "#80CBC4" }}>{accountUsername}</strong></span>
+        <button
+          onClick={handleLogout}
           style={{
-            margin: "20px auto",
-            padding: "20px",
-            border: "2px solid #333",
-            width: panelWidth,
-            borderRadius: "15px",
-            backgroundColor: "#1e1e1e",
-            boxSizing: "border-box",
+            padding: "8px 12px",
+            cursor: "pointer",
+            backgroundColor: "#37474F",
+            color: "white",
+            border: "none",
+            borderRadius: "8px",
+            fontWeight: "bold",
           }}
         >
-          <h3 style={{ marginTop: 0 }}>Lobby</h3>
-          {isSearching ? (
-            <p>Searching for opponent...</p>
-          ) : (
-            <>
-              <button
-                onClick={findMatch}
-                style={{
-                  width: "100%",
-                  padding: "13px",
-                  cursor: "pointer",
-                  backgroundColor: "#FF9800",
-                  color: "white",
-                  border: "none",
-                  borderRadius: "8px",
-                  fontWeight: "bold",
-                  fontSize: "clamp(0.9rem, 3.8vw, 1.1rem)",
-                  marginBottom: "12px",
-                }}
-              >
-                AUTO MATCH
-              </button>
+          LOG OUT
+        </button>
+      </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "12px" }}>
+      {!currentMatchId ? (
+        <div style={{ display: "grid", gap: "18px", justifyContent: "center" }}>
+          <div
+            style={{
+              margin: "0 auto",
+              padding: "20px",
+              border: "2px solid #333",
+              width: panelWidth,
+              borderRadius: "15px",
+              backgroundColor: "#1e1e1e",
+              boxSizing: "border-box",
+            }}
+          >
+            <h3 style={{ marginTop: 0 }}>Lobby</h3>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "14px" }}>
+              {modeOptions.map((mode) => (
                 <button
-                  onClick={createRoom}
+                  key={mode.id}
+                  onClick={() => setSelectedMode(mode.id)}
                   style={{
-                    padding: "11px",
+                    padding: "12px",
                     cursor: "pointer",
-                    backgroundColor: "#1565C0",
+                    backgroundColor: selectedMode === mode.id ? "#00ACC1" : "#263238",
+                    color: "white",
+                    border: "1px solid #455A64",
+                    borderRadius: "10px",
+                  }}
+                >
+                  <strong>{mode.label}</strong>
+                  <div style={{ fontSize: "12px", marginTop: "4px", color: "#CFD8DC" }}>{mode.description}</div>
+                </button>
+              ))}
+            </div>
+
+            {isSearching ? (
+              <p>Searching for a {selectedMode} opponent...</p>
+            ) : (
+              <>
+                <button
+                  onClick={findMatch}
+                  style={{
+                    width: "100%",
+                    padding: "13px",
+                    cursor: "pointer",
+                    backgroundColor: "#FF9800",
                     color: "white",
                     border: "none",
                     borderRadius: "8px",
                     fontWeight: "bold",
+                    fontSize: "clamp(0.9rem, 3.8vw, 1.1rem)",
+                    marginBottom: "12px",
                   }}
                 >
-                  CREATE ROOM
+                  AUTO MATCH ({selectedMode.toUpperCase()})
                 </button>
-                <button
-                  onClick={refreshRooms}
-                  style={{
-                    padding: "11px",
-                    cursor: "pointer",
-                    backgroundColor: "#455A64",
-                    color: "white",
-                    border: "none",
-                    borderRadius: "8px",
-                    fontWeight: "bold",
-                  }}
-                >
-                  REFRESH ROOMS
-                </button>
-              </div>
 
-              {roomError && <p style={{ color: "#FF8A80", margin: "8px 0" }}>{roomError}</p>}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "12px" }}>
+                  <button
+                    onClick={createRoom}
+                    style={{
+                      padding: "11px",
+                      cursor: "pointer",
+                      backgroundColor: "#1565C0",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "8px",
+                      fontWeight: "bold",
+                    }}
+                  >
+                    CREATE ROOM
+                  </button>
+                  <button
+                    onClick={refreshRooms}
+                    style={{
+                      padding: "11px",
+                      cursor: "pointer",
+                      backgroundColor: "#455A64",
+                      color: "white",
+                      border: "none",
+                      borderRadius: "8px",
+                      fontWeight: "bold",
+                    }}
+                  >
+                    REFRESH ROOMS
+                  </button>
+                </div>
 
-              <div style={{ textAlign: "left", marginTop: "10px" }}>
-                <p style={{ margin: "6px 0", color: "#BDBDBD" }}>Open Rooms</p>
-                {roomsLoading ? (
-                  <p style={{ margin: 0 }}>Loading rooms...</p>
-                ) : rooms.length === 0 ? (
-                  <p style={{ margin: 0, color: "#9E9E9E" }}>No open rooms found.</p>
-                ) : (
-                  rooms.map((room) => (
-                    <div
-                      key={room.matchId}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: "10px",
-                        marginBottom: "8px",
-                        padding: "8px 10px",
-                        border: "1px solid #333",
-                        borderRadius: "8px",
-                      }}
-                    >
-                      <span style={{ fontSize: "12px", color: "#CFD8DC" }}>
-                        {room.matchId.slice(0, 8)}... ({room.size}/2)
-                      </span>
-                      <button
-                        onClick={() => joinRoom(room.matchId)}
+                {roomError && <p style={{ color: "#FF8A80", margin: "8px 0" }}>{roomError}</p>}
+
+                <div style={{ textAlign: "left", marginTop: "10px" }}>
+                  <p style={{ margin: "6px 0", color: "#BDBDBD" }}>Open {selectedMode} Rooms</p>
+                  {roomsLoading ? (
+                    <p style={{ margin: 0 }}>Loading rooms...</p>
+                  ) : rooms.length === 0 ? (
+                    <p style={{ margin: 0, color: "#9E9E9E" }}>No open rooms found for this mode.</p>
+                  ) : (
+                    rooms.map((room) => (
+                      <div
+                        key={room.matchId}
                         style={{
-                          padding: "7px 10px",
-                          cursor: "pointer",
-                          backgroundColor: "#2E7D32",
-                          color: "white",
-                          border: "none",
-                          borderRadius: "6px",
-                          fontWeight: "bold",
-                          fontSize: "12px",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: "10px",
+                          marginBottom: "8px",
+                          padding: "8px 10px",
+                          border: "1px solid #333",
+                          borderRadius: "8px",
                         }}
                       >
-                        JOIN
-                      </button>
+                        <span style={{ fontSize: "12px", color: "#CFD8DC" }}>
+                          {room.matchId.slice(0, 8)}... ({room.size}/2) - {room.mode}
+                        </span>
+                        <button
+                          onClick={() => joinRoom(room.matchId)}
+                          style={{
+                            padding: "7px 10px",
+                            cursor: "pointer",
+                            backgroundColor: "#2E7D32",
+                            color: "white",
+                            border: "none",
+                            borderRadius: "6px",
+                            fontWeight: "bold",
+                            fontSize: "12px",
+                          }}
+                        >
+                          JOIN
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
+          <div
+            style={{
+              margin: "0 auto",
+              padding: "20px",
+              border: "2px solid #333",
+              width: panelWidth,
+              borderRadius: "15px",
+              backgroundColor: "#1e1e1e",
+              boxSizing: "border-box",
+              textAlign: "left",
+            }}
+          >
+            <h3 style={{ marginTop: 0, textAlign: "center" }}>Leaderboard</h3>
+            {leaderboardLoading ? (
+              <p style={{ margin: 0 }}>Loading leaderboard...</p>
+            ) : leaderboardError ? (
+              <p style={{ margin: 0, color: "#FF8A80" }}>{leaderboardError}</p>
+            ) : leaderboard.length === 0 ? (
+              <p style={{ margin: 0, color: "#9E9E9E" }}>No ranked players yet.</p>
+            ) : (
+              leaderboard.map((entry) => (
+                <div
+                  key={entry.ownerId || `${entry.rank}-${entry.username}`}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "48px 1fr auto",
+                    gap: "10px",
+                    alignItems: "center",
+                    padding: "10px 0",
+                    borderBottom: "1px solid #263238",
+                  }}
+                >
+                  <strong style={{ color: "#80CBC4" }}>#{entry.rank || "-"}</strong>
+                  <div>
+                    <div>{formatPlayerName(entry.username, entry.ownerId)}</div>
+                    <div style={{ fontSize: "12px", color: "#B0BEC5" }}>
+                      {entry.stats?.wins || 0}W / {entry.stats?.losses || 0}L / {entry.stats?.draws || 0}D
                     </div>
-                  ))
-                )}
+                  </div>
+                  <div style={{ textAlign: "right", fontSize: "12px", color: "#FFE082" }}>
+                    streak {entry.stats?.currentWinStreak || 0}
+                  </div>
+                </div>
+              ))
+            )}
+
+            {myStanding && (
+              <div
+                style={{
+                  marginTop: "14px",
+                  paddingTop: "12px",
+                  borderTop: "1px solid #37474F",
+                  textAlign: "center",
+                  color: "#CFD8DC",
+                }}
+              >
+                Your rank: #{myStanding.rank || "-"} - {myStanding.stats?.wins || 0} wins - streak {myStanding.stats?.currentWinStreak || 0}
               </div>
-            </>
-          )}
+            )}
+          </div>
         </div>
       ) : (
         <>
@@ -537,16 +948,17 @@ function App() {
             }}
           >
             <p style={{ margin: "5px 0", fontSize: "1.2em" }}>
-              Playing as:{" "}
-              <strong style={{ color: mySymbol === "X" ? "#FF5252" : "#448AFF" }}>
-                {mySymbol || "Assigning..."}
-              </strong>
+              Playing as <strong style={{ color: mySymbol === "X" ? "#FF5252" : "#448AFF" }}>{mySymbol || "..."}</strong> in{" "}
+              <strong style={{ color: "#80CBC4" }}>{activeMode}</strong> mode
             </p>
+            {activeMode === "timed" && Number.isFinite(turnSecondsRemaining) && (
+              <p style={{ margin: "4px 0 0 0", color: isMyTurn ? "#FFD54F" : "#B0BEC5" }}>
+                {isMyTurn ? "Your clock" : "Opponent clock"}: {turnSecondsRemaining}s
+              </p>
+            )}
           </div>
 
-          <h2 style={{ height: "40px", color: hasGameEnded ? "#4CAF50" : "#fff" }}>
-            {statusText}
-          </h2>
+          <h2 style={{ minHeight: "40px", color: hasGameEnded ? "#4CAF50" : "#fff" }}>{statusText}</h2>
 
           {hasGameEnded && (
             <div style={{ marginBottom: "18px" }}>
@@ -563,7 +975,7 @@ function App() {
                   fontSize: "16px",
                 }}
               >
-                PLAY AGAIN
+                BACK TO LOBBY
               </button>
             </div>
           )}
