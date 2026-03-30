@@ -2,10 +2,10 @@
   font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  color: #f3efe6;
+  color: #edf2f7;
   background:
-    radial-gradient(circle at top, rgba(247, 178, 103, 0.18), transparent 34%),
-    linear-gradient(180deg, #0c111b 0%, #101827 48%, #0b1220 100%);
+    radial-gradient(circle at top, rgba(247, 178, 103, 0.16), transparent 34%),
+    linear-gradient(180deg, #0c111b 0%, #101827 50%, #0b1220 100%);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -36,12 +36,13 @@ select {
 
 h1 {
   margin: 0 0 12px;
-  font-size: clamp(2.2rem, 6vw, 4.4rem);
+  font-size: clamp(2.3rem, 6vw, 4.5rem);
   line-height: 0.98;
 }
 
 h2 {
-  font-size: clamp(1.3rem, 3.6vw, 1.8rem);
+  margin: 0;
+  font-size: clamp(1.35rem, 3.5vw, 1.85rem);
 }
 
 p {

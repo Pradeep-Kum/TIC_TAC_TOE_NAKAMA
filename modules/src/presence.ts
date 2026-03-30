@@ -1,21 +1,18 @@
-function getPresenceUserId(presence: Presence | UserPresence): string | null {
+function getPresenceUserId(presence) {
     return presence.userId || presence.user_id || null;
 }
 
-function getPresenceSessionId(presence: Presence | UserPresence): string | null {
+function getPresenceSessionId(presence) {
     return presence.sessionId || presence.session_id || null;
 }
 
-function matchesPlayerIdentity(player: PlayerState, presence: Presence | UserPresence): boolean {
-    var sessionId = getPresenceSessionId(presence);
-    var userId = getPresenceUserId(presence);
-
-    return player.sessionId === sessionId || player.userId === userId;
+function getPresenceUsername(presence) {
+    return presence.username || presence.user_name || null;
 }
 
-function findPlayerByPresence(state: MatchState, presence: Presence | UserPresence): PlayerState | null {
+function findPlayerBySymbol(state: MatchState, symbol: CellSymbol): PlayerState | null {
     for (var i = 0; i < state.players.length; i++) {
-        if (matchesPlayerIdentity(state.players[i], presence)) {
+        if (state.players[i].symbol === symbol) {
             return state.players[i];
         }
     }

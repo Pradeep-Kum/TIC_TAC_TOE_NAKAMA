@@ -1,5 +1,5 @@
-function InitModule(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: Nakama, initializer: nkruntime.Initializer) {
-    initializer.registerMatch("tic-tac-toe", {
+function InitModule(ctx, logger, nk, initializer) {
+    initializer.registerMatch(MATCH_NAME, {
         matchInit: matchInit,
         matchJoinAttempt: matchJoinAttempt,
         matchJoin: matchJoin,
@@ -8,7 +8,9 @@ function InitModule(ctx: nkruntime.Context, logger: nkruntime.Logger, nk: Nakama
         matchTerminate: matchTerminate,
         matchSignal: matchSignal
     });
-
     initializer.registerRpc("create_ttt_match", rpcCreateMatch);
+    initializer.registerRpc("get_ttt_leaderboard", rpcGetLeaderboard);
     initializer.registerMatchmakerMatched(matchmakerMatched);
+
+    ensureLeaderboard(logger, nk);
 }

@@ -1,22 +1,15 @@
-function broadcastState(
-    nk: Nakama,
-    dispatcher: MatchDispatcher,
-    state: MatchState,
-    presences?: Presence[]
-): void {
+function broadcastState(nk, dispatcher, state: MatchState, tick: number, presences?) {
     var payload = JSON.stringify({
         board: state.board,
         turn: state.turn,
         players: state.players,
         status: state.status,
         winner: state.winner,
-        endedReason: state.endedReason
+        endedReason: state.endedReason,
+        mode: state.mode,
+        turnTimeLimitSeconds: state.turnTimeLimitSeconds,
+        turnSecondsRemaining: getTurnSecondsRemaining(state, tick)
     });
 
     dispatcher.broadcastMessage(1, nk.stringToBinary(payload), presences || null);
-}
-
-function parseMoveIndex(nk: Nakama, message: MatchDataMessage): number {
-    var input = JSON.parse(nk.binaryToString(message.data));
-    return Number(input.index);
 }
