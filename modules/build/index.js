@@ -1,32 +1,4 @@
 "use strict";
-var MATCH_NAME = "tic-tac-toe";
-var STATS_COLLECTION = "ttt_stats";
-var STATS_KEY = "summary";
-var LEADERBOARD_ID = "ttt_global_ranking";
-var DEFAULT_TURN_SECONDS = 30;
-function InitModule(ctx, logger, nk, initializer) {
-    initializer.registerMatch(MATCH_NAME, {
-        matchInit: matchInit,
-        matchJoinAttempt: matchJoinAttempt,
-        matchJoin: matchJoin,
-        matchLeave: matchLeave,
-        matchLoop: matchLoop,
-        matchTerminate: matchTerminate,
-        matchSignal: matchSignal
-    });
-    initializer.registerRpc("create_ttt_match", rpcCreateMatch);
-    initializer.registerRpc("get_ttt_leaderboard", rpcGetLeaderboard);
-    initializer.registerMatchmakerMatched(matchmakerMatched);
-    ensureLeaderboard(logger, nk);
-}
-function ensureLeaderboard(logger, nk) {
-    try {
-        nk.leaderboardCreate(LEADERBOARD_ID, true, "desc", "set", null, { game: MATCH_NAME }, true);
-    }
-    catch (error) {
-        logger.warn("Leaderboard init skipped: %v", error);
-    }
-}
 function matchmakerMatched(ctx, logger, nk, matches) {
     return nk.matchCreate(MATCH_NAME, {
         mode: getMatchedMode(matches)
@@ -64,54 +36,39 @@ function rpcGetLeaderboard(ctx, logger, nk, payload) {
         prevCursor: leaderboard.prevCursor || null
     });
 }
-function parseJsonPayload(payload) {
-    if (!payload) {
-        return {};
-    }
-    if (typeof payload === "string") {
-        try {
-            return JSON.parse(payload);
-        }
-        catch (error) {
-            return {};
-        }
-    }
-    return payload;
-}
-function normalizeMode(mode) {
-    return mode === "timed" ? "timed" : "classic";
-}
-function getTurnLimitSeconds(mode) {
-    return normalizeMode(mode) === "timed" ? DEFAULT_TURN_SECONDS : null;
-}
-function createMatchLabel(mode) {
-    return JSON.stringify({
-        name: MATCH_NAME,
-        mode: normalizeMode(mode)
-    });
-}
-function getPresenceUserId(presence) {
-    return presence.userId || presence.user_id || null;
-}
-function getPresenceSessionId(presence) {
-    return presence.sessionId || presence.session_id || null;
-}
-function getPresenceUsername(presence) {
-    return presence.username || presence.user_name || null;
+var MATCH_NAME = "tic-tac-toe";
+var STATS_COLLECTION = "ttt_stats";
+var STATS_KEY = "summary";
+var LEADERBOARD_ID = "ttt_global_ranking";
+var DEFAULT_TURN_SECONDS = 30;
+var WINNING_LINES = [
+    [0, 1, 2],
+    [3, 4, 5],
+    [6, 7, 8],
+    [0, 3, 6],
+    [1, 4, 7],
+    [2, 5, 8],
+    [0, 4, 8],
+    [2, 4, 6]
+];
+function createInitialMatchState(mode) {
+    return {
+        board: new Array(9).fill(null),
+        players: [],
+        turn: "X",
+        status: "waiting",
+        winner: null,
+        endedReason: null,
+        mode: mode,
+        turnTimeLimitSeconds: getTurnLimitSeconds(mode),
+        turnDeadlineTick: null,
+        lastTimerBroadcastTick: null,
+        resultRecorded: false
+    };
 }
 function getWinningSymbol(board) {
-    var lines = [
-        [0, 1, 2],
-        [3, 4, 5],
-        [6, 7, 8],
-        [0, 3, 6],
-        [1, 4, 7],
-        [2, 5, 8],
-        [0, 4, 8],
-        [2, 4, 6]
-    ];
-    for (var i = 0; i < lines.length; i++) {
-        var line = lines[i];
+    for (var i = 0; i < WINNING_LINES.length; i++) {
+        var line = WINNING_LINES[i];
         var a = line[0];
         var b = line[1];
         var c = line[2];
@@ -136,36 +93,84 @@ function getTurnSecondsRemaining(state, tick) {
     var remaining = state.turnDeadlineTick - tick;
     return remaining > 0 ? remaining : 0;
 }
-function broadcastState(nk, dispatcher, state, tick, presences) {
-    var payload = JSON.stringify({
-        board: state.board,
-        turn: state.turn,
-        players: state.players,
-        status: state.status,
-        winner: state.winner,
-        endedReason: state.endedReason,
-        mode: state.mode,
-        turnTimeLimitSeconds: state.turnTimeLimitSeconds,
-        turnSecondsRemaining: getTurnSecondsRemaining(state, tick)
+function parseJsonPayload(payload) {
+    if (!payload) {
+        return {};
+    }
+    if (typeof payload === "string") {
+        try {
+            return JSON.parse(payload);
+        }
+        catch (error) {
+            return {};
+        }
+    }
+    return payload;
+}
+function normalizeMode(mode) {
+    return mode === "timed" ? "timed" : "classic";
+}
+function getTurnLimitSeconds(mode) {
+    return mode === "timed" ? DEFAULT_TURN_SECONDS : null;
+}
+function createMatchLabel(mode) {
+    return JSON.stringify({
+        name: MATCH_NAME,
+        mode: normalizeMode(mode)
     });
-    dispatcher.broadcastMessage(1, nk.stringToBinary(payload), presences || null);
+}
+function getMatchedMode(matches) {
+    if (!matches || !matches.length) {
+        return "classic";
+    }
+    for (var i = 0; i < matches.length; i++) {
+        var mode = readModeFromMatchmakerEntry(matches[i]);
+        if (mode) {
+            return mode;
+        }
+    }
+    return "classic";
+}
+function readModeFromMatchmakerEntry(entry) {
+    if (!entry) {
+        return null;
+    }
+    var candidates = [
+        entry.properties,
+        entry.stringProperties,
+        entry.string_properties,
+        entry.presence && entry.presence.properties,
+        entry.presence && entry.presence.stringProperties,
+        entry.presence && entry.presence.string_properties
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+        var current = candidates[i];
+        if (!current) {
+            continue;
+        }
+        return normalizeMode(current.mode);
+    }
+    return null;
+}
+function InitModule(ctx, logger, nk, initializer) {
+    initializer.registerMatch(MATCH_NAME, {
+        matchInit: matchInit,
+        matchJoinAttempt: matchJoinAttempt,
+        matchJoin: matchJoin,
+        matchLeave: matchLeave,
+        matchLoop: matchLoop,
+        matchTerminate: matchTerminate,
+        matchSignal: matchSignal
+    });
+    initializer.registerRpc("create_ttt_match", rpcCreateMatch);
+    initializer.registerRpc("get_ttt_leaderboard", rpcGetLeaderboard);
+    initializer.registerMatchmakerMatched(matchmakerMatched);
+    ensureLeaderboard(logger, nk);
 }
 function matchInit(ctx, logger, nk, params) {
     var mode = normalizeMode(params && params.mode);
     return {
-        state: {
-            board: new Array(9).fill(null),
-            players: [],
-            turn: "X",
-            status: "waiting",
-            winner: null,
-            endedReason: null,
-            mode: mode,
-            turnTimeLimitSeconds: getTurnLimitSeconds(mode),
-            turnDeadlineTick: null,
-            lastTimerBroadcastTick: null,
-            resultRecorded: false
-        },
+        state: createInitialMatchState(mode),
         tickRate: 1,
         label: createMatchLabel(mode)
     };
@@ -189,12 +194,11 @@ function matchJoin(ctx, logger, nk, dispatcher, tick, state, presences) {
             }
         }
         if (!exists) {
-            var symbol = state.players.length === 0 ? "X" : "O";
             state.players.push({
                 userId: userId,
                 sessionId: sessionId,
                 username: getPresenceUsername(presence),
-                symbol: symbol
+                symbol: state.players.length === 0 ? "X" : "O"
             });
         }
     }
@@ -317,41 +321,28 @@ function matchTerminate(ctx, logger, nk, dispatcher, tick, state, graceSeconds) 
 function matchSignal(ctx, logger, nk, dispatcher, tick, state, data) {
     return { state: state, data: "ok" };
 }
-function getMatchedMode(matches) {
-    if (!matches || !matches.length) {
-        return "classic";
-    }
-    for (var i = 0; i < matches.length; i++) {
-        var mode = readModeFromMatchmakerEntry(matches[i]);
-        if (mode) {
-            return mode;
-        }
-    }
-    return "classic";
+function broadcastState(nk, dispatcher, state, tick, presences) {
+    var payload = JSON.stringify({
+        board: state.board,
+        turn: state.turn,
+        players: state.players,
+        status: state.status,
+        winner: state.winner,
+        endedReason: state.endedReason,
+        mode: state.mode,
+        turnTimeLimitSeconds: state.turnTimeLimitSeconds,
+        turnSecondsRemaining: getTurnSecondsRemaining(state, tick)
+    });
+    dispatcher.broadcastMessage(1, nk.stringToBinary(payload), presences || null);
 }
-function readModeFromMatchmakerEntry(entry) {
-    if (!entry) {
-        return null;
-    }
-    var candidates = [
-        entry.properties,
-        entry.stringProperties,
-        entry.string_properties,
-        entry.presence && entry.presence.properties,
-        entry.presence && entry.presence.stringProperties,
-        entry.presence && entry.presence.string_properties
-    ];
-    for (var i = 0; i < candidates.length; i++) {
-        var current = candidates[i];
-        if (!current) {
-            continue;
-        }
-        var mode = normalizeMode(current.mode);
-        if (mode) {
-            return mode;
-        }
-    }
-    return null;
+function getPresenceUserId(presence) {
+    return presence.userId || presence.user_id || null;
+}
+function getPresenceSessionId(presence) {
+    return presence.sessionId || presence.session_id || null;
+}
+function getPresenceUsername(presence) {
+    return presence.username || presence.user_name || null;
 }
 function findPlayerBySymbol(state, symbol) {
     for (var i = 0; i < state.players.length; i++) {
@@ -361,36 +352,55 @@ function findPlayerBySymbol(state, symbol) {
     }
     return null;
 }
-function finalizeMatch(logger, nk, state, winnerSymbol, disconnectedPlayers) {
-    if (state.resultRecorded) {
-        return;
+function ensureLeaderboard(logger, nk) {
+    try {
+        nk.leaderboardCreate(LEADERBOARD_ID, true, "desc", "set", null, { game: MATCH_NAME }, true);
     }
-    state.resultRecorded = true;
-    for (var i = 0; i < state.players.length; i++) {
-        var player = state.players[i];
-        var outcome = winnerSymbol === null ? "draw" : player.symbol === winnerSymbol ? "win" : "loss";
-        updatePlayerStats(logger, nk, player, outcome);
+    catch (error) {
+        logger.warn("Leaderboard init skipped: %v", error);
     }
-    for (var j = 0; j < disconnectedPlayers.length; j++) {
-        var disconnectedPlayer = disconnectedPlayers[j];
-        var alreadyUpdated = false;
-        for (var k = 0; k < state.players.length; k++) {
-            if (state.players[k].userId === disconnectedPlayer.userId) {
-                alreadyUpdated = true;
-                break;
-            }
+}
+function createEmptyStats(userId) {
+    return {
+        userId: userId,
+        username: null,
+        gamesPlayed: 0,
+        wins: 0,
+        losses: 0,
+        draws: 0,
+        currentWinStreak: 0,
+        bestWinStreak: 0
+    };
+}
+function readPlayerStats(nk, userId) {
+    var stats = createEmptyStats(userId);
+    try {
+        var objects = nk.storageRead([{
+                collection: STATS_COLLECTION,
+                key: STATS_KEY,
+                userId: userId
+            }]);
+        if (objects && objects.length && objects[0].value) {
+            var value = objects[0].value;
+            stats.username = value.username || stats.username;
+            stats.gamesPlayed = Number(value.gamesPlayed) || 0;
+            stats.wins = Number(value.wins) || 0;
+            stats.losses = Number(value.losses) || 0;
+            stats.draws = Number(value.draws) || 0;
+            stats.currentWinStreak = Number(value.currentWinStreak) || 0;
+            stats.bestWinStreak = Number(value.bestWinStreak) || 0;
         }
-        if (!alreadyUpdated) {
-            updatePlayerStats(logger, nk, disconnectedPlayer, "loss");
-        }
     }
+    catch (error) {
+        return stats;
+    }
+    return stats;
 }
 function updatePlayerStats(logger, nk, player, outcome) {
     if (!player || !player.userId) {
         return;
     }
     var stats = readPlayerStats(nk, player.userId);
-    stats.userId = player.userId;
     if (player.username) {
         stats.username = player.username;
     }
@@ -437,42 +447,29 @@ function updatePlayerStats(logger, nk, player, outcome) {
         logger.error("Leaderboard write failed for %v: %v", player.userId, error);
     }
 }
-function readPlayerStats(nk, userId) {
-    var stats = createEmptyStats(userId);
-    try {
-        var objects = nk.storageRead([{
-                collection: STATS_COLLECTION,
-                key: STATS_KEY,
-                userId: userId
-            }]);
-        if (objects && objects.length && objects[0].value) {
-            var value = objects[0].value;
-            stats.userId = userId;
-            stats.username = value.username || stats.username;
-            stats.gamesPlayed = Number(value.gamesPlayed) || 0;
-            stats.wins = Number(value.wins) || 0;
-            stats.losses = Number(value.losses) || 0;
-            stats.draws = Number(value.draws) || 0;
-            stats.currentWinStreak = Number(value.currentWinStreak) || 0;
-            stats.bestWinStreak = Number(value.bestWinStreak) || 0;
+function finalizeMatch(logger, nk, state, winnerSymbol, disconnectedPlayers) {
+    if (state.resultRecorded) {
+        return;
+    }
+    state.resultRecorded = true;
+    for (var i = 0; i < state.players.length; i++) {
+        var player = state.players[i];
+        var outcome = winnerSymbol === null ? "draw" : player.symbol === winnerSymbol ? "win" : "loss";
+        updatePlayerStats(logger, nk, player, outcome);
+    }
+    for (var j = 0; j < disconnectedPlayers.length; j++) {
+        var disconnectedPlayer = disconnectedPlayers[j];
+        var alreadyUpdated = false;
+        for (var k = 0; k < state.players.length; k++) {
+            if (state.players[k].userId === disconnectedPlayer.userId) {
+                alreadyUpdated = true;
+                break;
+            }
+        }
+        if (!alreadyUpdated) {
+            updatePlayerStats(logger, nk, disconnectedPlayer, "loss");
         }
     }
-    catch (error) {
-        return stats;
-    }
-    return stats;
-}
-function createEmptyStats(userId) {
-    return {
-        userId: userId,
-        username: null,
-        gamesPlayed: 0,
-        wins: 0,
-        losses: 0,
-        draws: 0,
-        currentWinStreak: 0,
-        bestWinStreak: 0
-    };
 }
 function mapLeaderboardRecord(record) {
     var metadata = record.metadata || {};

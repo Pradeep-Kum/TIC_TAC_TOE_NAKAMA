@@ -2,6 +2,10 @@
 
 This project is a real-time multiplayer Tic-Tac-Toe game built with a server-authoritative architecture. The backend is powered by Nakama, and the frontend is built with React and Vite. Players can enter automatic matchmaking, create private game rooms, browse open rooms, compete in classic or timed matches, and play against each other in synchronized live sessions.
 
+## Play Online
+
+Click here to play: https://tic-tac-toe-nakama-nu.vercel.app/
+
 ## What This Project Does
 
 - Supports real-time multiplayer Tic-Tac-Toe for two players
@@ -56,6 +60,15 @@ The backend also exposes custom RPCs for room creation and leaderboard reads, us
 - `tic-tac-toe-ui`: React frontend application
 - `docker-compose.yml`: local Nakama and PostgreSQL setup
 - `Dockerfile`: container build for the backend service
+
+## Notes
+
+This branch also includes bonus functionality beyond the core assignment requirements:
+
+- Username/password login using Nakama email authentication with synthetic emails behind the scenes
+- Persistent player stats stored in Nakama storage
+- Global leaderboard powered by Nakama leaderboard records
+- Classic and timed queues with mode-aware room discovery
 
 ## Key Design Choice
 
